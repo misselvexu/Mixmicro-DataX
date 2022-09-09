@@ -19,8 +19,10 @@
 
 package com.wgzhao.addax.plugin.writer.hdfswriter;
 
-import com.alibaba.fastjson.JSON;
-import com.alibaba.fastjson.JSONObject;
+import com.alibaba.fastjson2.JSON;
+import com.alibaba.fastjson2.JSONObject;
+import com.google.common.base.Splitter;
+import com.google.common.collect.Iterables;
 import com.wgzhao.addax.common.base.Constant;
 import com.wgzhao.addax.common.base.Key;
 import com.wgzhao.addax.common.element.Column;
@@ -78,10 +80,12 @@ import java.math.BigDecimal;
 import java.nio.charset.StandardCharsets;
 import java.sql.Timestamp;
 import java.text.SimpleDateFormat;
+import java.time.LocalDate;
 import java.util.ArrayList;
 import java.util.Base64;
 import java.util.Date;
 import java.util.List;
+import java.util.Objects;
 import java.util.Set;
 import java.util.StringJoiner;
 
@@ -294,6 +298,12 @@ public class HdfsHelper
             this.kerberosKeytabFilePath = taskConfig.getString(Key.KERBEROS_KEYTAB_FILE_PATH);
             this.kerberosPrincipal = taskConfig.getString(Key.KERBEROS_PRINCIPAL);
             hadoopConf.set(HADOOP_SECURITY_AUTHENTICATION_KEY, "kerberos");
+            // fix Failed to specify server's Kerberos principal name
+            if (Objects.equals(hadoopConf.get("dfs.namenode.kerberos.principal", ""), "")) {
+                // get REALM
+                String serverPrincipal = "nn/_HOST@" + Iterables.get(Splitter.on('@').split(this.kerberosPrincipal), 1);
+                hadoopConf.set("dfs.namenode.kerberos.principal", serverPrincipal);
+            }
         }
         this.kerberosAuthentication(this.kerberosPrincipal, this.kerberosKeytabFilePath);
         conf = new JobConf(hadoopConf);
@@ -648,6 +658,14 @@ public class HdfsHelper
         return schema;
     }
 
+    /**
+     * write an orc record
+     * @param batch {@link VectorizedRowBatch}
+     * @param row row number
+     * @param record {@link Record}
+     * @param columns table columns, {@link List}
+     * @param taskPluginCollector {@link TaskPluginCollector}
+     */
     private void setRow(VectorizedRowBatch batch, int row, Record record, List<Configuration> columns,
             TaskPluginCollector taskPluginCollector)
     {
@@ -675,8 +693,10 @@ public class HdfsHelper
                     case INT:
                     case BIGINT:
                     case BOOLEAN:
-                    case DATE:
                         ((LongColumnVector) col).vector[row] = record.getColumn(i).asLong();
+                        break;
+                    case DATE:
+                        ((LongColumnVector) col).vector[row] = LocalDate.parse(record.getColumn(i).asString()).toEpochDay();
                         break;
                     case FLOAT:
                     case DOUBLE:
@@ -689,7 +709,7 @@ public class HdfsHelper
                         ((DecimalColumnVector) col).set(row, hdw);
                         break;
                     case TIMESTAMP:
-                        ((TimestampColumnVector) col).set(row, java.sql.Timestamp.valueOf(record.getColumn(i).asString()));
+                        ((TimestampColumnVector) col).set(row, record.getColumn(i).asTimestamp());
                         break;
                     case STRING:
                     case VARCHAR:
@@ -698,6 +718,14 @@ public class HdfsHelper
                         if (record.getColumn(i).getType() == Column.Type.BYTES) {
                             //convert bytes to base64 string
                             buffer = Base64.getEncoder().encode((byte[]) record.getColumn(i).getRawData());
+                        }
+                        else if (record.getColumn(i).getType() == Column.Type.DATE) {
+                            SimpleDateFormat sdf = new SimpleDateFormat("yyyy-MM-dd");
+                            buffer = sdf.format(record.getColumn(i).asDate()).getBytes(StandardCharsets.UTF_8);
+                        }
+                        else if (record.getColumn(i).getType() == Column.Type.TIMESTAMP) {
+                            SimpleDateFormat sdf = new SimpleDateFormat(Constant.DEFAULT_DATE_FORMAT);
+                            buffer = sdf.format(record.getColumn(i).asDate()).getBytes(StandardCharsets.UTF_8);
                         }
                         else {
                             buffer = record.getColumn(i).getRawData().toString().getBytes(StandardCharsets.UTF_8);
@@ -743,9 +771,6 @@ public class HdfsHelper
                 joiner.add(String.format("%s:%s(%s,%s)", column.getString(Key.NAME), "decimal",
                         column.getInt(Key.PRECISION, Constant.DEFAULT_DECIMAL_MAX_PRECISION),
                         column.getInt(Key.SCALE, Constant.DEFAULT_DECIMAL_MAX_SCALE)));
-            }
-            else if ("date".equalsIgnoreCase(column.getString(Key.TYPE))) {
-                joiner.add(String.format("%s:bigint", column.getString(Key.NAME)));
             }
             else {
                 joiner.add(String.format("%s:%s", column.getString(Key.NAME), column.getString(Key.TYPE)));
